@@ -1,17 +1,14 @@
+#!/usr/bin/env python3
 import pika
 import json
 import time
-import random
 from datetime import datetime
 from enum import Enum, auto
 
 
 class GraspState(Enum):
-    SCANNING = auto()        # Looking for objects
-    APPROACHING = auto()     # Moving towards selected object
-    GRASPING = auto()        # Attempting to grasp
-    HOLDING = auto()         # Successfully grasped
-    RELEASING = auto()       # Releasing object
+    IDLE = auto()
+    GRASPING = auto()
 
 
 class SimulatedVisionPublisher:
@@ -24,119 +21,108 @@ class SimulatedVisionPublisher:
 
         # Objects to detect and grasp
         self.objects = [
-            {'id': 1, 'name': 'cup', 'color': 'blue', 'size': 'medium'},
-            {'id': 2, 'name': 'ball', 'color': 'red', 'size': 'small'},
-            {'id': 3, 'name': 'box', 'color': 'green', 'size': 'large'}
+            {'id': 1, 'name': 'left_object', 'position': -40},
+            {'id': 2, 'name': 'center_object', 'position': 0},
+            {'id': 3, 'name': 'right_object', 'position': 40}
         ]
+
+        # Track which objects have been grasped by each agent
+        self.agent1_grasped_objects = set()
+        self.agent2_grasped_objects = set()
 
         # Simulation parameters
         self.fps = 30
         self.frame_time = 1.0 / self.fps
-        self.processing_time = 0.03
+        self.last_print_time = time.time()
 
-        # State management
-        self.current_state = GraspState.SCANNING
-        self.detected_objects = []
-        self.selected_object = None
-        self.grasp_progress = 0.0  # 0.0 to 1.0
-        self.state_start_time = time.time()
+        # State management for both agents
+        self.agent1_state = GraspState.IDLE
+        self.agent2_state = GraspState.IDLE
+        self.agent1_grasped_object = None
+        self.agent2_grasped_object = None
 
-        # Position simulation (simplified 2D)
-        self.hand_position = {'x': 0.0, 'y': 0.0}
-        self.object_positions = self._generate_object_positions()
+        # Timing parameters (in seconds)
+        self.grasp_duration = 8.0     # Each grasp lasts 8 seconds
+        self.idle_duration = 12.0     # 12 seconds between grasps
+        self.agent_offset = 10.0      # 10 seconds offset between agents
 
-    def _generate_object_positions(self):
-        # Generate random positions for objects (simplified 2D)
-        positions = {}
+        # Keep track of individual agent timings
+        self.agent1_last_action = time.time()
+        self.agent2_last_action = time.time() + self.agent_offset
+
+    def get_next_available_object(self, agent_grasped_objects):
+        """Get the next object that hasn't been grasped by this agent yet"""
         for obj in self.objects:
-            positions[obj['id']] = {
-                'x': random.uniform(-1.0, 1.0),
-                'y': random.uniform(-1.0, 1.0)
-            }
-        return positions
+            if obj['id'] not in agent_grasped_objects:
+                agent_grasped_objects.add(obj['id'])
+                return obj
+        return None
 
-    def _update_state(self):
+    def update_states(self):
         current_time = time.time()
-        elapsed = current_time - self.state_start_time
 
-        if self.current_state == GraspState.SCANNING:
-            # Simulate object detection
-            self.detected_objects = []
-            for obj in self.objects:
-                if random.random() < 0.95:  # 95% detection rate
-                    obj_data = obj.copy()
-                    obj_data['position'] = self.object_positions[obj['id']]
-                    obj_data['confidence'] = random.uniform(0.85, 0.98)
-                    self.detected_objects.append(obj_data)
+        # Update Agent 1
+        time_since_last_agent1 = current_time - self.agent1_last_action
+        if self.agent1_state == GraspState.IDLE:
+            if time_since_last_agent1 >= self.idle_duration:
+                next_object = self.get_next_available_object(
+                    self.agent1_grasped_objects)
+                if next_object:
+                    self.agent1_state = GraspState.GRASPING
+                    self.agent1_grasped_object = next_object
+                    self.agent1_last_action = current_time
+        else:  # GRASPING
+            if time_since_last_agent1 >= self.grasp_duration:
+                self.agent1_state = GraspState.IDLE
+                self.agent1_grasped_object = None
+                self.agent1_last_action = current_time
 
-            if self.detected_objects and elapsed > 2.0:
-                self.selected_object = random.choice(self.detected_objects)
-                self.current_state = GraspState.APPROACHING
-                self.state_start_time = current_time
-
-        elif self.current_state == GraspState.APPROACHING:
-            # Simulate approaching the object
-            target_pos = self.selected_object['position']
-            dx = target_pos['x'] - self.hand_position['x']
-            dy = target_pos['y'] - self.hand_position['y']
-
-            # Update hand position
-            speed = 0.1
-            self.hand_position['x'] += dx * speed
-            self.hand_position['y'] += dy * speed
-
-            # Check if we're close enough
-            distance = (dx**2 + dy**2)**0.5
-            if distance < 0.1 or elapsed > 3.0:
-                self.current_state = GraspState.GRASPING
-                self.state_start_time = current_time
-                self.grasp_progress = 0.0
-
-        elif self.current_state == GraspState.GRASPING:
-            # Simulate grasping motion
-            self.grasp_progress = min(1.0, elapsed / 1.5)
-
-            if self.grasp_progress >= 1.0:
-                self.current_state = GraspState.HOLDING
-                self.state_start_time = current_time
-
-        elif self.current_state == GraspState.HOLDING:
-            if elapsed > 2.0:
-                self.current_state = GraspState.RELEASING
-                self.state_start_time = current_time
-                self.grasp_progress = 1.0
-
-        elif self.current_state == GraspState.RELEASING:
-            # Simulate release motion
-            self.grasp_progress = max(0.0, 1.0 - elapsed / 1.0)
-
-            if self.grasp_progress <= 0.0:
-                self.current_state = GraspState.SCANNING
-                self.state_start_time = current_time
-                self.selected_object = None
-                # Reset hand position
-                self.hand_position = {'x': 0.0, 'y': 0.0}
+        # Update Agent 2
+        time_since_last_agent2 = current_time - self.agent2_last_action
+        if self.agent2_state == GraspState.IDLE:
+            if time_since_last_agent2 >= self.idle_duration:
+                next_object = self.get_next_available_object(
+                    self.agent2_grasped_objects)
+                if next_object:
+                    self.agent2_state = GraspState.GRASPING
+                    self.agent2_grasped_object = next_object
+                    self.agent2_last_action = current_time
+        else:  # GRASPING
+            if time_since_last_agent2 >= self.grasp_duration:
+                self.agent2_state = GraspState.IDLE
+                self.agent2_grasped_object = None
+                self.agent2_last_action = current_time
 
     def generate_vision_data(self):
-        self._update_state()
+        self.update_states()
 
         data = {
             'timestamp': datetime.now().isoformat(),
             'frame_number': int(time.time() * self.fps),
-            'state': self.current_state.name,
-            'hand_position': self.hand_position,
-            'detected_objects': self.detected_objects,
-            'processing_time_ms': round(self.processing_time * 1000, 2)
+            'agent1_state': self.agent1_state.name,
+            'agent2_state': self.agent2_state.name,
+            'agent1_grasped_object': (
+                {'id': self.agent1_grasped_object['id'],
+                 'name': self.agent1_grasped_object['name'],
+                 'position': self.agent1_grasped_object['position']}
+                if self.agent1_grasped_object else None
+            ),
+            'agent2_grasped_object': (
+                {'id': self.agent2_grasped_object['id'],
+                 'name': self.agent2_grasped_object['name'],
+                 'position': self.agent2_grasped_object['position']}
+                if self.agent2_grasped_object else None
+            )
         }
-
-        if self.selected_object:
-            data['selected_object'] = self.selected_object
-            data['grasp_progress'] = round(self.grasp_progress, 3)
 
         return data
 
     def run(self):
         print("Starting simulated vision publisher...")
+        print(f"Grasp duration: {self.grasp_duration}s")
+        print(f"Idle duration: {self.idle_duration}s")
+        print(f"Offset between agents: {self.agent_offset}s")
+        print("Each object will be grasped once by each agent")
         print("Press Ctrl+C to stop")
 
         try:
@@ -150,16 +136,36 @@ class SimulatedVisionPublisher:
                     routing_key='hand_data',
                     body=json.dumps(data)
                 )
-                print(f" [x] State: {data['state']}")
-                if 'selected_object' in data:
-                    print(f"     Object: {data['selected_object']['name']}")
+
+                # Print status once per second
+                current_time = time.time()
+                if current_time - self.last_print_time >= 1.0:
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}]")
+                    print(f"Agent 1 State: {data['agent1_state']}")
+                    if data['agent1_grasped_object']:
+                        print(
+                            f"Agent 1 grasping: {data['agent1_grasped_object']['name']}")
                     print(
-                        f"     Grasp Progress: {data.get('grasp_progress', 0):.2f}")
+                        f"Objects grasped by Agent 1: {len(self.agent1_grasped_objects)}/3")
 
-                # Simulate processing time
-                time.sleep(self.processing_time)
+                    print(f"Agent 2 State: {data['agent2_state']}")
+                    if data['agent2_grasped_object']:
+                        print(
+                            f"Agent 2 grasping: {data['agent2_grasped_object']['name']}")
+                    print(
+                        f"Objects grasped by Agent 2: {len(self.agent2_grasped_objects)}/3")
+                    self.last_print_time = current_time
 
-                # Wait for next frame
+                # Check if all objects have been grasped by both agents
+                if len(self.agent1_grasped_objects) == 3 and \
+                   len(self.agent2_grasped_objects) == 3 and \
+                   self.agent1_state == GraspState.IDLE and \
+                   self.agent2_state == GraspState.IDLE:
+                    print(
+                        "\nAll objects have been grasped by both agents. Stopping simulation.")
+                    break
+
+                # Maintain frame rate
                 elapsed = time.time() - start_time
                 if elapsed < self.frame_time:
                     time.sleep(self.frame_time - elapsed)
